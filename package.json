@@ -1,0 +1,9 @@
+{
+  "name": "artifactory-gate",
+  "version": "0.1.0",
+  "description": "JFrog Artifactory Worker that gates uncached remote package downloads by package version age.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

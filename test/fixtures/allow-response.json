@@ -1,0 +1,11 @@
+{
+  "decision": "allow",
+  "reason": "Package version is older than the 48 hour minimum age.",
+  "ecosystem": "npm",
+  "package_name": "@scope/pkg",
+  "version": "1.2.3",
+  "published_at": "2026-06-09T12:30:00.000Z",
+  "age_hours": 74.5,
+  "minimum_age_hours": 48,
+  "policy_id": "package-age-gate-v1"
+}

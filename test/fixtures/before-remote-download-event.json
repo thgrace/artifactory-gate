@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "repoPath": {
+      "key": "npm-remote",
+      "path": "@scope/pkg/-/pkg-1.2.3.tgz",
+      "id": "npm-remote:@scope/pkg/-/pkg-1.2.3.tgz",
+      "isRoot": false,
+      "isFolder": false
+    },
+    "originalRepoPath": {
+      "key": "npm-virtual",
+      "path": "@scope/pkg/-/pkg-1.2.3.tgz",
+      "id": "npm-virtual:@scope/pkg/-/pkg-1.2.3.tgz",
+      "isRoot": false,
+      "isFolder": false
+    },
+    "name": "pkg-1.2.3.tgz",
+    "uri": "/artifactory/npm-remote/@scope/pkg/-/pkg-1.2.3.tgz",
+    "clientAddress": "10.0.0.10",
+    "headOnly": false,
+    "checksum": false,
+    "metadata": false
+  },
+  "userContext": {
+    "id": "alice",
+    "isToken": true,
+    "realm": "internal"
+  }
+}
