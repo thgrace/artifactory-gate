@@ -1,0 +1,51 @@
+name: Allowlist request
+description: Request that a specific package version bypass the artifactory-gate age check.
+title: "[allowlist] <system>:<name>@<version>"
+labels:
+  - allowlist-request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Request an exact `system:name@version` bypass of the package-age gate.
+
+        On submit, automation validates the request (shape + deps.dev existence),
+        appends it to `allowlist.json`, and opens a pull request that closes this
+        issue. A human reviews and merges that PR — merging is the only approval
+        gate. Do not edit `allowlist.json` by hand for routine requests.
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      description: The package ecosystem.
+      options:
+        - npm
+        - pypi
+    validations:
+      required: true
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      description: >-
+        Package name exactly as published. npm scoped names include the leading
+        @scope/ (for example @scope/pkg). PyPI names are normalized automatically.
+      placeholder: "@scope/pkg"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Exact version string to allow. Future versions stay gated.
+      placeholder: "1.2.3"
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason
+      description: Why this version must bypass the gate (ticket link encouraged).
+      placeholder: "Approved exception — tracked in TICKET-123."
+    validations:
+      required: true

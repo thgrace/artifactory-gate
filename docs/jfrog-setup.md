@@ -1,27 +1,24 @@
 # JFrog Setup
 
-This Worker gates uncached package downloads at the Artifactory remote-download boundary.
+This Worker gates uncached package downloads at the Artifactory remote-download boundary. It resolves package version publish times from the public [deps.dev](https://deps.dev) API and blocks versions younger than 48 hours.
+
+The Worker reads no secrets and takes no configuration. deps.dev is unauthenticated and called directly.
 
 ## Prerequisites
 
 - JFrog Workers enabled for the Artifactory instance.
-- Entitlement support for Stop Action on the `Before Remote Download` event if enforcement blocking is required.
-- A separately implemented package-age policy API that satisfies [api-contract.md](api-contract.md).
+- Entitlement support for Stop Action on the `Before Remote Download` event (required for the Worker's `ActionStatus.STOP` to actually block).
+- Outbound network access from the Worker runtime to `https://api.deps.dev`.
 
 ## Manual UI Deployment
 
 1. Navigate to JFrog Platform Administration > Workers.
 2. Create a new event-driven Artifactory Worker.
 3. Select event/action: `Before Remote Download` / `BEFORE_REMOTE_DOWNLOAD`.
-4. Add filter criteria for target remote repositories, such as `npm-remote`, `pypi-remote`, or selected virtual/remote repositories depending on how Artifactory evaluates the event in the environment.
+4. Add filter criteria targeting the **remote** repository keys (e.g. `npm-remote`, `pypi-remote`). `Before Remote Download` fires on the backing remote, not the virtual: when a package is pulled through a virtual repo, the event's `repoPath.key` (and `originalRepoPath.key`) is the remote that resolves the request, not the virtual. A filter scoped only to the virtual repo key never matches, so the gate silently never runs. Scope the filter to the remote repo key(s).
 5. Paste the standalone TypeScript source from [../workers/package-age-gate.before-remote-download.ts](../workers/package-age-gate.before-remote-download.ts).
-6. Add Worker secrets:
-   - `PACKAGE_AGE_GATE_URL`
-   - `PACKAGE_AGE_GATE_TOKEN`
-   - optional `PACKAGE_AGE_GATE_MODE=audit`
-7. Test with the Worker testing pane using [../test/fixtures/before-remote-download-event.json](../test/fixtures/before-remote-download-event.json).
-8. Roll out in `audit` mode first.
-9. Switch to `enforce` after validating logs and package manager behavior.
+6. Test with the Worker testing pane using [../test/fixtures/before-remote-download-event.json](../test/fixtures/before-remote-download-event.json).
+7. Save and enable the Worker.
 
 ## JFrog CLI Deployment Option
 
@@ -32,9 +29,8 @@ JFrog CLI Worker commands operate from a CLI-managed Worker directory. This repo
 1. Configure a JFrog CLI server profile for the target platform.
 2. Initialize a local Worker deployment directory.
 3. Copy this repository's Worker source into the generated `worker.ts`.
-4. Add Worker secrets locally with `jf worker add-secret`.
-5. Test-run against the fixture payload.
-6. Deploy with `jf worker deploy`.
+4. Test-run against the fixture payload.
+5. Deploy with `jf worker deploy`.
 
 Example:
 
@@ -45,46 +41,37 @@ cd .jfrog-worker/package-age-gate
 jf worker init BEFORE_REMOTE_DOWNLOAD package-age-gate --server-id <server-id> --force
 cp ../../workers/package-age-gate.before-remote-download.ts ./worker.ts
 
-jf worker add-secret PACKAGE_AGE_GATE_URL
-jf worker add-secret PACKAGE_AGE_GATE_TOKEN
-jf worker add-secret PACKAGE_AGE_GATE_MODE
-
 jf worker test-run @../../test/fixtures/before-remote-download-event.json --server-id <server-id>
 jf worker deploy --server-id <server-id>
 jf worker list --server-id <server-id> --json
 ```
 
-Review the generated `manifest.json` before deployment. Set the Worker description, enabled state, and repository filters for the target remote or virtual repositories. Keep environment-specific values out of the public repository.
+Review the generated `manifest.json` before deployment. Set the Worker description, enabled state, and `filterCriteria.artifactFilterCriteria.repoKeys`. Scope `repoKeys` to the **remote** repository keys — `Before Remote Download` fires on the backing remote, so a filter listing only a virtual repo key never matches and the gate never runs. Keep environment-specific values out of the public repository.
 
-Do not commit encrypted secrets or deployment manifests from `.jfrog-worker/` unless your organization has explicitly approved that practice. The generated manifest can contain environment-specific configuration, and secrets added by `jf worker add-secret` are protected by a master password that is needed for `test-run` and `deploy`.
+Every response object the Worker returns must include `requestHeaders` (alongside `status` and `message`); `BeforeRemoteDownloadResponse` requires it, and `jf worker deploy` rejects the source with a type error if any return omits it.
 
-## Modes
-
-| Mode | Behavior |
-| --- | --- |
-| `audit` | API `block` decisions return `ActionStatus.WARN` and log that the Worker would have blocked. |
-| `enforce` | API `block` decisions return `ActionStatus.STOP`. This is the default. |
+Do not commit deployment manifests from `.jfrog-worker/` unless your organization has explicitly approved that practice. The generated manifest can contain environment-specific configuration.
 
 ## Behavior Matrix
 
-| Scenario | API response | Mode | Worker status |
-| --- | --- | --- | --- |
-| Package age is 72 hours | `allow` | `enforce` | `ActionStatus.PROCEED` |
-| Package age is 12 hours | `block` | `enforce` | `ActionStatus.STOP` |
-| Package age is 12 hours | `block` | `audit` | `ActionStatus.WARN` |
-| API cannot determine publish time | `warn` | any | `ActionStatus.WARN` |
-| API unavailable | error | `enforce` | `ActionStatus.STOP` |
-| API unavailable | error | `audit` | `ActionStatus.WARN` |
-| HEAD/checksum/metadata request | skipped | any | `ActionStatus.PROCEED` |
+| Scenario | deps.dev result | Worker status |
+| --- | --- | --- |
+| Package pinned in `allowlist.json` | (no call made) | `ActionStatus.PROCEED` |
+| Package age is 72 hours | `publishedAt` 72h ago | `ActionStatus.PROCEED` |
+| Package age is 12 hours | `publishedAt` 12h ago | `ActionStatus.STOP` |
+| Version not yet indexed | `404` | `ActionStatus.STOP` (fail closed) |
+| deps.dev unavailable | transport error | `ActionStatus.STOP` (fail closed) |
+| Cannot determine publish time | no `publishedAt` | `ActionStatus.WARN` |
+| Unsupported ecosystem / unparseable path | (no call made) | `ActionStatus.WARN` |
+| HEAD/checksum/metadata request | (no call made) | `ActionStatus.PROCEED` |
 
 ## Deployment Checklist
 
 - [ ] Confirm the Artifactory/JFrog plan supports Stop Action for `Before Remote Download`.
-- [ ] Confirm target repositories are remote repositories or virtual repositories backed by remote repositories.
-- [ ] Deploy the Worker in `audit` mode.
+- [ ] Confirm `repoKeys` lists the remote repository keys (not just a virtual key) — the event fires on the backing remote, so a virtual-only filter never matches.
+- [ ] Confirm the Worker runtime can reach `https://api.deps.dev`.
+- [ ] Deploy and enable the Worker.
 - [ ] Trigger package manager installs for known new and old packages.
-- [ ] Verify audit logs show would-block behavior for packages under 48 hours old.
-- [ ] Switch `PACKAGE_AGE_GATE_MODE` to `enforce`.
 - [ ] Confirm under-48-hour packages are blocked before upstream download/cache.
 - [ ] Confirm older packages download and cache normally.
 - [ ] Decide whether to add a separate `Before Download` Worker for already-cached artifacts.
@@ -94,4 +81,4 @@ Do not commit encrypted secrets or deployment manifests from `.jfrog-worker/` un
 - Scoped npm packages such as `@scope/pkg`.
 - PyPI wheels and sdists.
 - Package manager HEAD requests before GET requests.
-- Virtual repositories that resolve to remote repositories.
+- Virtual repositories that resolve to remote repositories. Verified live: pulling a fresh (<48h) npm package through a virtual repo (`appsec-test` → remote `npm-appsec-remote-test`) triggers the Worker with `repoPath.key` set to the remote, and the gate returns `STOP` (the download surfaces as HTTP 404 and the package is never cached). The Worker filter must list the remote key for this to fire.

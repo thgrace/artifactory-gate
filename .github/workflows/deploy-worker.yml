@@ -1,0 +1,69 @@
+# Deploy the package-age-gate Worker to JFrog on merge to main.
+#
+# Triggers when a push to main changes the runtime Worker source or the allowlist
+# (whose generated block lives inside the Worker source). The intake flow lands
+# both via a reviewed PR, so a merge here is an approved change.
+#
+# Required GitHub secrets (access-token auth):
+#   JF_URL           - JFrog platform base URL, e.g. https://example.jfrog.io
+#   JF_ACCESS_TOKEN  - JFrog access token with permission to deploy this Worker
+#
+# Worker identity (override via repo/org variables if they differ here):
+#   WORKER_KEY       - the Worker name registered on the platform (default: package-age-gate)
+# The worker key default matches .jfrog-worker/package-age-gate/manifest.json
+# ("name": "package-age-gate"). `.jfrog-worker/` is gitignored, so this job
+# reconstructs a minimal CLI worker project at deploy time from the committed
+# Worker source at workers/package-age-gate.before-remote-download.ts.
+
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "workers/**"
+      - "allowlist.json"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      WORKER_KEY: ${{ vars.WORKER_KEY || 'package-age-gate' }}
+      WORKER_SOURCE: workers/package-age-gate.before-remote-download.ts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard — required secrets present
+        run: |
+          if [ -z "${{ secrets.JF_URL }}" ] || [ -z "${{ secrets.JF_ACCESS_TOKEN }}" ]; then
+            echo "::error::JF_URL and JF_ACCESS_TOKEN secrets must be set for deploy." >&2
+            exit 1
+          fi
+
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ secrets.JF_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+
+      - name: Build worker project and deploy
+        env:
+          JF_URL: ${{ secrets.JF_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          # .jfrog-worker/ is not committed (gitignored); recreate the CLI worker
+          # project from the committed Worker source, then deploy.
+          WORK_DIR=".jfrog-worker/${WORKER_KEY}"
+          mkdir -p "$WORK_DIR"
+          cd "$WORK_DIR"
+
+          # jf worker init scaffolds manifest.json + worker.ts for the event type.
+          jf worker init BEFORE_REMOTE_DOWNLOAD "$WORKER_KEY" --force
+          cp "${GITHUB_WORKSPACE}/${WORKER_SOURCE}" ./worker.ts
+
+          jf worker deploy

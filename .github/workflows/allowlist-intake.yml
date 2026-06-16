@@ -1,0 +1,178 @@
+# Allowlist intake: turn an "allowlist-request" issue into a reviewed PR.
+#
+# Flow: parse the issue form -> shape-validate -> dedupe against allowlist.json ->
+# check the version exists on deps.dev -> on success, append the entry, regenerate
+# the Worker block, and open a PR that `Closes #<issue>`. A CODEOWNERS reviewer
+# merging that PR is the only human approval gate; merge then triggers
+# deploy-worker.yml.
+#
+# Auth: uses the built-in GITHUB_TOKEN only (no PAT). The token needs the
+# permissions declared below; ensure "Allow GitHub Actions to create and approve
+# pull requests" is enabled in repo/org settings so the workflow can open PRs.
+
+name: Allowlist intake
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  intake:
+    # Only act on issues carrying the allowlist-request label.
+    if: contains(join(github.event.issue.labels.*.name, ','), 'allowlist-request')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Parse and validate issue (shape)
+        id: parse
+        run: |
+          node --input-type=module <<'EOF'
+          import { appendFileSync } from "node:fs";
+          import { parseIssueBody } from "./scripts/parse-issue.mjs";
+
+          try {
+            const entry = parseIssueBody(process.env.ISSUE_BODY ?? "", process.env.ISSUE_AUTHOR ?? "");
+            const out = process.env.GITHUB_OUTPUT;
+            appendFileSync(out, `entry=${JSON.stringify(entry)}\n`);
+            appendFileSync(out, `label=${entry.system}:${entry.name}@${entry.version}\n`);
+            appendFileSync(out, `ok=true\n`);
+          } catch (error) {
+            appendFileSync(process.env.GITHUB_OUTPUT, `ok=false\n`);
+            appendFileSync(process.env.GITHUB_OUTPUT, `error=${error.message}\n`);
+          }
+          EOF
+
+      - name: Comment and fail on invalid shape
+        if: steps.parse.outputs.ok != 'true'
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --add-label invalid
+          gh issue comment "$ISSUE_NUMBER" --body "Allowlist request rejected (invalid form): ${{ steps.parse.outputs.error }}
+
+          Please edit the issue to fix it; this workflow re-runs on edit."
+          exit 1
+
+      - name: Dedupe against allowlist.json
+        id: dedupe
+        run: |
+          node --input-type=module <<'EOF'
+          import { appendFileSync, readFileSync } from "node:fs";
+          import { entryLabel } from "./scripts/build-allowlist.mjs";
+
+          const entry = JSON.parse(process.env.ENTRY);
+          const allowlist = JSON.parse(readFileSync("allowlist.json", "utf8"));
+          const label = entryLabel(entry, 0);
+          const existing = new Set(allowlist.map((e, i) => entryLabel(e, i)));
+          const dup = existing.has(label);
+          appendFileSync(process.env.GITHUB_OUTPUT, `duplicate=${dup}\n`);
+          EOF
+        env:
+          ENTRY: ${{ steps.parse.outputs.entry }}
+
+      - name: Comment and fail on duplicate
+        if: steps.dedupe.outputs.duplicate == 'true'
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --add-label invalid
+          gh issue comment "$ISSUE_NUMBER" --body "Allowlist request rejected: \`${{ steps.parse.outputs.label }}\` is already in the allowlist. No change needed."
+          exit 1
+
+      - name: Check version exists on deps.dev
+        id: depsdev
+        run: |
+          node --input-type=module <<'EOF'
+          import { appendFileSync } from "node:fs";
+
+          const entry = JSON.parse(process.env.ENTRY);
+          // entry.name is already PEP 503 normalized for pypi by the parser.
+          const url = `https://api.deps.dev/v3/systems/${entry.system}/packages/` +
+            `${encodeURIComponent(entry.name)}/versions/${encodeURIComponent(entry.version)}`;
+
+          const out = process.env.GITHUB_OUTPUT;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 2500);
+          try {
+            const res = await fetch(url, { signal: controller.signal });
+            clearTimeout(timer);
+            if (res.status === 200) {
+              appendFileSync(out, `result=ok\n`);
+            } else if (res.status === 404) {
+              appendFileSync(out, `result=missing\n`);
+            } else {
+              // Non-200/404 (e.g. 5xx) is treated as an outage: do not auto-reject.
+              appendFileSync(out, `result=error\n`);
+              appendFileSync(out, `detail=deps.dev returned status ${res.status}\n`);
+            }
+          } catch (error) {
+            clearTimeout(timer);
+            // Transport error / timeout: do not auto-reject on an API outage.
+            appendFileSync(out, `result=error\n`);
+            appendFileSync(out, `detail=${error.name === "AbortError" ? "deps.dev request timed out" : error.message}\n`);
+          }
+          EOF
+        env:
+          ENTRY: ${{ steps.parse.outputs.entry }}
+
+      - name: Reject — version not found on deps.dev
+        if: steps.depsdev.outputs.result == 'missing'
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --add-label invalid
+          gh issue comment "$ISSUE_NUMBER" --body "Allowlist request rejected: deps.dev has no record of \`${{ steps.parse.outputs.label }}\` (HTTP 404). The version may be misspelled or not yet published/indexed. Fix the issue and it will re-run on edit."
+          exit 1
+
+      - name: Needs review — deps.dev unavailable
+        if: steps.depsdev.outputs.result == 'error'
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --add-label needs-review
+          gh issue comment "$ISSUE_NUMBER" --body "Could not confirm \`${{ steps.parse.outputs.label }}\` against deps.dev (${{ steps.depsdev.outputs.detail }}). Not auto-rejecting on an API outage — labeled \`needs-review\` for manual handling. Re-run by editing the issue once deps.dev is reachable."
+          exit 1
+
+      - name: Apply entry and regenerate Worker block
+        if: steps.depsdev.outputs.result == 'ok'
+        run: |
+          node scripts/apply-allowlist-entry.mjs "$ENTRY"
+          npm run build:allowlist
+        env:
+          ENTRY: ${{ steps.parse.outputs.entry }}
+
+      - name: Open pull request
+        if: steps.depsdev.outputs.result == 'ok'
+        run: |
+          BRANCH="allowlist/issue-${ISSUE_NUMBER}"
+          LABEL="${{ steps.parse.outputs.label }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add allowlist.json workers/
+          git commit -m "allowlist: add ${LABEL} (issue #${ISSUE_NUMBER})"
+          git push --force-with-lease origin "$BRANCH"
+
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "allowlist: add ${LABEL}" \
+            --body "Adds \`${LABEL}\` to the allowlist, requested in #${ISSUE_NUMBER}.
+
+          Validated: form shape, not a duplicate, and present on deps.dev (HTTP 200).
+          Merging this PR is the approval; it auto-deploys the Worker on merge to main.
+
+          Closes #${ISSUE_NUMBER}")
+
+          gh issue edit "$ISSUE_NUMBER" --add-label allowlist-pr-open
+          gh issue comment "$ISSUE_NUMBER" --body "Validated and opened ${PR_URL} adding \`${LABEL}\`. A code owner review + merge approves and deploys it."

@@ -1,141 +1,73 @@
-# Package Age Gate API Contract
+# deps.dev Lookup Contract
 
-The Worker calls a placeholder policy API before Artifactory downloads an uncached package from an upstream remote repository.
+Before Artifactory downloads an uncached package from an upstream remote, the Worker resolves the package version's publish time from the public [deps.dev](https://deps.dev) API and computes its age.
 
-This repository does not implement the API. The API owns all package-ecosystem metadata resolution, including npm, PyPI, Cargo, Maven, or other registry-specific publish-time lookups.
+The Worker calls deps.dev directly. There is no separate policy API and no configuration: deps.dev is unauthenticated, and its base URL is a hardcoded constant (`DEPS_DEV_BASE_URL = https://api.deps.dev`) in the Worker.
 
-## Endpoint
+## Deriving the request
 
-Configure the endpoint through the Worker secret:
+The Worker parses the Artifactory `repoPath` to derive three values:
 
-```text
-PACKAGE_AGE_GATE_URL
-```
+| Value | Source |
+| --- | --- |
+| `system` | The repo key. `npm` if the key contains `npm`; `pypi` if it contains `pypi` or `pip`. Any other key is an unsupported ecosystem. |
+| `name` | Parsed from the artifact path. npm: `[@scope/]name/-/...`. PyPI: the package name segment of the wheel/sdist filename (PEP 503 normalized). |
+| `version` | Parsed from the artifact path filename. |
 
-The Worker sends an HTTP `POST` request with:
+If the ecosystem is unsupported or the path cannot be parsed, the Worker returns `ActionStatus.WARN` without calling deps.dev.
+
+## Request
 
 ```http
-Authorization: Bearer <PACKAGE_AGE_GATE_TOKEN>
-Content-Type: application/json
+GET https://api.deps.dev/v3/systems/{system}/packages/{name}/versions/{version}
 ```
 
-The Worker timeout is `2500` ms.
+`{name}` and `{version}` are URL-encoded. The request timeout is `2500` ms. No headers are required.
 
-## Request Body
+Example:
+
+```http
+GET https://api.deps.dev/v3/systems/npm/packages/%40scope%2Fpkg/versions/1.2.3
+```
+
+## Response
+
+The Worker reads a single field from the deps.dev version record:
 
 ```json
 {
-  "policy": {
-    "name": "package-age-gate",
-    "minimum_age_hours": 48
-  },
-  "artifact": {
-    "repo_key": "npm-remote",
-    "path": "@scope/pkg/-/pkg-1.2.3.tgz",
-    "id": "npm-remote:@scope/pkg/-/pkg-1.2.3.tgz",
-    "name": "pkg-1.2.3.tgz",
-    "uri": "/artifactory/npm-remote/@scope/pkg/-/pkg-1.2.3.tgz"
-  },
-  "original_artifact": {
-    "repo_key": "npm-virtual",
-    "path": "@scope/pkg/-/pkg-1.2.3.tgz",
-    "id": "npm-virtual:@scope/pkg/-/pkg-1.2.3.tgz"
-  },
-  "request": {
-    "client_address": "10.0.0.10",
-    "user_id": "alice",
-    "user_realm": "internal",
-    "is_token": true,
-    "head_only": false,
-    "checksum": false,
-    "metadata": false
-  },
-  "worker": {
-    "event": "BEFORE_REMOTE_DOWNLOAD",
-    "timestamp": "2026-06-12T15:00:00.000Z"
-  }
+  "publishedAt": "2026-06-09T12:30:00Z"
 }
 ```
 
-## Request Fields
-
-| Field | Description |
+| Field | Used for |
 | --- | --- |
-| `policy.name` | Static policy name, currently `package-age-gate`. |
-| `policy.minimum_age_hours` | Minimum accepted package version age. Currently `48`. |
-| `artifact` | Resolved remote repository path metadata from Artifactory. |
-| `original_artifact` | Original repository path metadata when Artifactory provides it, often from a virtual repository. |
-| `request` | Caller and request-shape metadata from the JFrog Worker event. |
-| `worker.event` | Static event name, `BEFORE_REMOTE_DOWNLOAD`. |
-| `worker.timestamp` | Worker-side timestamp when the policy request was generated. |
+| `publishedAt` | RFC 3339 publish timestamp. The Worker computes `age_hours = (now - publishedAt) / 3600000`. |
 
-The API should use the artifact metadata to identify the package ecosystem, package name, and version. The Worker intentionally does not parse package manager paths.
+deps.dev returns additional fields; the Worker ignores them.
 
-## Response: Allow
+## Worker response shape
 
-Return `allow` when the package version is at least `minimum_age_hours` old.
+Every value the Worker returns is a `BeforeRemoteDownloadResponse`, which requires three fields — `status`, `message`, and `requestHeaders`:
 
-```json
+```ts
 {
-  "decision": "allow",
-  "reason": "Package version is older than the 48 hour minimum age.",
-  "ecosystem": "npm",
-  "package_name": "@scope/pkg",
-  "version": "1.2.3",
-  "published_at": "2026-06-09T12:30:00.000Z",
-  "age_hours": 74.5,
-  "minimum_age_hours": 48,
-  "policy_id": "package-age-gate-v1"
+  status: ActionStatus,            // PROCEED | STOP | WARN
+  message: string,                 // human-readable reason, logged by the platform
+  requestHeaders: { [k: string]: { value: string[] } }  // headers to inject on the upstream request
 }
 ```
 
-Worker result: `ActionStatus.PROCEED`.
+The age gate never injects headers, so it returns `requestHeaders: {}` on every path. The field is non-optional: `jf worker deploy` fails type validation if any return omits it.
 
-## Response: Block
+## Outcomes
 
-Return `block` when the package version is younger than `minimum_age_hours`.
-
-```json
-{
-  "decision": "block",
-  "reason": "Package version is only 13.2 hours old.",
-  "ecosystem": "npm",
-  "package_name": "@scope/pkg",
-  "version": "1.2.3",
-  "published_at": "2026-06-12T01:48:00.000Z",
-  "age_hours": 13.2,
-  "minimum_age_hours": 48,
-  "policy_id": "package-age-gate-v1"
-}
-```
-
-Worker result:
-
-- `ActionStatus.STOP` in `enforce` mode.
-- `ActionStatus.WARN` in `audit` mode.
-
-## Response: Warn Or Unknown
-
-Return `warn` when the API cannot make a definitive allow/block decision.
-
-```json
-{
-  "decision": "warn",
-  "reason": "Could not determine publish time for this artifact.",
-  "minimum_age_hours": 48,
-  "policy_id": "package-age-gate-v1"
-}
-```
-
-Worker result: `ActionStatus.WARN`.
-
-## Transport Errors
-
-API transport failures are not treated the same as an API `warn` decision.
-
-| Mode | Worker result |
+| deps.dev result | Worker status |
 | --- | --- |
-| `enforce` | `ActionStatus.STOP` |
-| `audit` | `ActionStatus.WARN` |
+| `publishedAt` present, `age_hours >= 48` | `ActionStatus.PROCEED` |
+| `publishedAt` present, `age_hours < 48` | `ActionStatus.STOP` (blocked) |
+| `publishedAt` missing / unparseable | `ActionStatus.WARN` |
+| `404` (version not indexed yet) | `ActionStatus.STOP` (fail closed) |
+| Any other transport error | `ActionStatus.STOP` (fail closed) |
 
-This fail-closed behavior prevents policy bypass when the external policy API is unavailable.
+A `404` is treated as a block, not a warning: an unindexed version is the freshly-published case the gate exists to catch. Fail-closed behavior prevents policy bypass when deps.dev is unavailable.
