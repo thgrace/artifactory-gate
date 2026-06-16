@@ -21,6 +21,7 @@ Supported ecosystems are **npm and PyPI** (the only path layouts the Worker pars
 │   ├── parse-issue.mjs                                  # pure: issue form body -> allowlist entry
 │   └── apply-allowlist-entry.mjs                        # pure+CLI: append entry to allowlist.json
 ├── workers/package-age-gate.before-remote-download.ts   # runtime Worker (single import-free file)
+├── deploy/<worker-key>/manifest.json                    # tracked deploy manifests (source of truth for scope)
 ├── .github/
 │   ├── CODEOWNERS                                        # review gate on allowlist.json + workers/
 │   ├── ISSUE_TEMPLATE/allowlist-request.yml             # allowlist request issue form
@@ -111,13 +112,17 @@ Routine allowlist requests come in as GitHub issues, not hand edits. The flow:
 4. **Review.** A CODEOWNERS reviewer (`.github/CODEOWNERS`) reviewing and merging
    the PR is the single human approval gate.
 5. **Auto-deploy.** `.github/workflows/deploy-worker.yml` triggers on push to
-   `main` touching `workers/**` or `allowlist.json`, configures JFrog CLI from
-   the `JF_URL` and `JF_ACCESS_TOKEN` repo secrets (access-token auth), and runs
-   `jf worker deploy`. Because `.jfrog-worker/` is gitignored, the job recreates
-   the CLI worker project (`jf worker init` + copy the committed Worker source)
-   before deploying. The worker key defaults to `package-age-gate` (matches
-   `.jfrog-worker/package-age-gate/manifest.json`) and is overridable via the
-   `WORKER_KEY` repo/org variable.
+   `main` touching `workers/**`, `allowlist.json`, or `deploy/**` (plus a
+   `workflow_dispatch` for on-demand deploys), runs `npm test` (gate 1),
+   configures JFrog CLI from the `JF_URL` and `JF_ACCESS_TOKEN` repo secrets
+   (access-token auth), assembles the worker project, runs `jf worker test-run`
+   against the fixture (gate 2 — exits non-zero only if the Worker crashes), then
+   `jf worker deploy`. Because `.jfrog-worker/` is gitignored, the job assembles
+   the CLI worker project from the committed Worker source + the tracked manifest
+   at `deploy/<worker-key>/manifest.json` (the manifest, not `jf worker init`,
+   controls scope/`repoKeys`/`debug`). The worker key defaults to
+   `package-age-gate-test`, overridable via the `workflow_dispatch` `worker`
+   input or the `WORKER_KEY` repo/org variable.
 
 Pure modules (`parse-issue.mjs`, `apply-allowlist-entry.mjs`) are network-free
 and side-effect-isolated so they unit-test directly under `node --test` without

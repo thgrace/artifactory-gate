@@ -1,0 +1,16 @@
+{
+    "name": "package-age-gate-test",
+    "description": "Gate uncached remote npm and PyPI downloads by package version age (test scope).",
+    "filterCriteria": {
+        "artifactFilterCriteria": {
+            "repoKeys": ["appsec-test", "npm-appsec-remote-test"]
+        }
+    },
+    "secrets": {},
+    "sourceCodePath": "./worker.ts",
+    "action": "BEFORE_REMOTE_DOWNLOAD",
+    "enabled": true,
+    "debug": true,
+    "projectKey": "",
+    "application": "artifactory"
+}

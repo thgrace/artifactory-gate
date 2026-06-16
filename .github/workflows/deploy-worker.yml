@@ -1,19 +1,24 @@
-# Deploy the package-age-gate Worker to JFrog on merge to main.
+# Deploy the package-age-gate Worker to JFrog.
 #
-# Triggers when a push to main changes the runtime Worker source or the allowlist
-# (whose generated block lives inside the Worker source). The intake flow lands
-# both via a reviewed PR, so a merge here is an approved change.
+# Triggers:
+#   - push to main changing the runtime Worker source, the allowlist (whose
+#     generated block lives inside the Worker source), or a tracked deploy
+#     manifest. The intake flow lands these via a reviewed PR, so a merge is an
+#     approved change.
+#   - workflow_dispatch, to deploy a chosen target on demand.
+#
+# Deploy target (Worker key) is configurable — it will move from the current
+# test Worker to a real prod Worker later, so nothing hardcodes it:
+#   1. workflow_dispatch input `worker`, else
+#   2. repo/org variable WORKER_KEY, else
+#   3. the default below (package-age-gate-test).
+# The resolved key MUST have a tracked manifest at deploy/<key>/manifest.json;
+# that manifest is the source of truth for scope (repoKeys), debug, and enabled.
+# Adding a target = adding a manifest, no workflow edits.
 #
 # Required GitHub secrets (access-token auth):
 #   JF_URL           - JFrog platform base URL, e.g. https://example.jfrog.io
 #   JF_ACCESS_TOKEN  - JFrog access token with permission to deploy this Worker
-#
-# Worker identity (override via repo/org variables if they differ here):
-#   WORKER_KEY       - the Worker name registered on the platform (default: package-age-gate)
-# The worker key default matches .jfrog-worker/package-age-gate/manifest.json
-# ("name": "package-age-gate"). `.jfrog-worker/` is gitignored, so this job
-# reconstructs a minimal CLI worker project at deploy time from the committed
-# Worker source at workers/package-age-gate.before-remote-download.ts.
 
 name: Deploy Worker
 
@@ -23,19 +28,51 @@ on:
     paths:
       - "workers/**"
       - "allowlist.json"
+      - "deploy/**"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+    inputs:
+      worker:
+        description: "Worker key to deploy (must have deploy/<worker>/manifest.json)"
+        type: string
+        required: false
+        default: package-age-gate-test
 
 permissions:
   contents: read
 
+env:
+  DEFAULT_WORKER_KEY: package-age-gate-test
+  WORKER_SOURCE: workers/package-age-gate.before-remote-download.ts
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      WORKER_KEY: ${{ vars.WORKER_KEY || 'package-age-gate' }}
-      WORKER_SOURCE: workers/package-age-gate.before-remote-download.ts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve deploy target
+        id: target
+        env:
+          INPUT_WORKER: ${{ inputs.worker }}
+          VAR_WORKER_KEY: ${{ vars.WORKER_KEY }}
+        run: |
+          set -euo pipefail
+          key="${INPUT_WORKER:-${VAR_WORKER_KEY:-$DEFAULT_WORKER_KEY}}"
+          manifest="deploy/${key}/manifest.json"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::No tracked manifest at ${manifest}. Add it before deploying '${key}'." >&2
+            exit 1
+          fi
+          echo "key=${key}" >> "$GITHUB_OUTPUT"
+          echo "manifest=${manifest}" >> "$GITHUB_OUTPUT"
+          echo "Deploying worker '${key}' from ${manifest}"
 
       - name: Guard — required secrets present
         run: |
@@ -44,26 +81,43 @@ jobs:
             exit 1
           fi
 
+      # Gate 1: offline unit tests (zero deps). Includes
+      # `build-allowlist.mjs --check`, which fails if the Worker's generated
+      # allowlist block has drifted from allowlist.json.
+      - name: Unit tests
+        run: npm test
+
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v4
         env:
           JF_URL: ${{ secrets.JF_URL }}
           JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
 
-      - name: Build worker project and deploy
+      # .jfrog-worker/ is gitignored; assemble the CLI worker project from the
+      # committed Worker source + the tracked manifest (the manifest, not
+      # `jf worker init`, controls scope).
+      - name: Assemble worker project
         env:
-          JF_URL: ${{ secrets.JF_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+          WORKER_KEY: ${{ steps.target.outputs.key }}
+          MANIFEST: ${{ steps.target.outputs.manifest }}
         run: |
           set -euo pipefail
-          # .jfrog-worker/ is not committed (gitignored); recreate the CLI worker
-          # project from the committed Worker source, then deploy.
-          WORK_DIR=".jfrog-worker/${WORKER_KEY}"
-          mkdir -p "$WORK_DIR"
-          cd "$WORK_DIR"
+          work_dir=".jfrog-worker/${WORKER_KEY}"
+          mkdir -p "$work_dir"
+          cp "${WORKER_SOURCE}" "${work_dir}/worker.ts"
+          cp "${MANIFEST}" "${work_dir}/manifest.json"
 
-          # jf worker init scaffolds manifest.json + worker.ts for the event type.
-          jf worker init BEFORE_REMOTE_DOWNLOAD "$WORKER_KEY" --force
-          cp "${GITHUB_WORKSPACE}/${WORKER_SOURCE}" ./worker.ts
+      # Gate 2: sandbox dry-run on the live platform. `jf worker test-run` exits
+      # non-zero only when the Worker crashes (executionStatus != STATUS_SUCCESS);
+      # a clean STOP/PROCEED/WARN exits 0. The fixture is the fail-closed STOP
+      # case, so this proves the assembled source executes end to end.
+      - name: Test-run (sandbox dry-run)
+        working-directory: .jfrog-worker/${{ steps.target.outputs.key }}
+        run: jf worker test-run @"${GITHUB_WORKSPACE}/test/fixtures/before-remote-download-event.json"
 
-          jf worker deploy
+      - name: Deploy
+        working-directory: .jfrog-worker/${{ steps.target.outputs.key }}
+        run: jf worker deploy
+
+      - name: Verify deployed
+        run: jf worker list --format json
