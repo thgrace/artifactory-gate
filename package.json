@@ -4,6 +4,8 @@
   "description": "JFrog Artifactory Worker that gates uncached remote package downloads by package version age.",
   "type": "module",
   "scripts": {
+    "build": "npm run build:workers && npm run build:allowlist",
+    "build:workers": "node scripts/build-workers.mjs",
     "build:allowlist": "node scripts/build-allowlist.mjs",
     "test": "node --test test/*.test.mjs"
   }

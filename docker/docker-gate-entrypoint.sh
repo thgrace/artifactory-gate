@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Wire the JFrog CLI to Vannevar Artifactory from the mounted .env, then exec the
-# container command. Env arrives via `docker run --env-file .env`:
+# Wire the JFrog CLI + npm to Vannevar Artifactory from the mounted .env, then
+# exec the container command (e.g. gate-test.sh). The configured `jf` client is
+# how the test bed pulls packages through the test virtual repo to trigger the
+# Before Remote Download Worker. Env arrives via `docker run --env-file .env`:
 #   ARTIFACTORY_URL    e.g. https://vannevarlabs.jfrog.io/artifactory
 #   ARTIFACTORY_TOKEN  access token
 #

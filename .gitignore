@@ -1,5 +1,7 @@
 node_modules/
 .npmrc
+.env
+docker/.env
 coverage/
 .DS_Store
 *.log
