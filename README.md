@@ -14,7 +14,7 @@ deps.dev is unauthenticated and called directly, so the Worker requires no secre
 - Package age `< 48h`: return `ActionStatus.STOP` (blocked).
 - deps.dev has no record of the version (`404`, i.e. not yet indexed): fail closed — `ActionStatus.STOP`.
 - deps.dev transport error: fail closed — `ActionStatus.STOP`.
-- Unsupported ecosystem, unparseable path, or missing `publishedAt`: return `ActionStatus.WARN` (cannot evaluate — never blocks).
+- Unsupported ecosystem, unparseable path, or missing `publishedAt`: fail closed — `ActionStatus.STOP` (cannot evaluate the age, so block). Keep the Worker scoped (manifest `repoKeys`) to remotes whose layout it parses, so the unsupported/unparseable branch does not block ecosystems the gate was never meant to cover.
 - HEAD / checksum / metadata requests: return `ActionStatus.PROCEED` (skip the deps.dev lookup; the actual content GET is still gated).
 
 Actual blocking with `STOP` on `Before Remote Download` requires the JFrog entitlement that supports Stop Action for this Worker type.
@@ -121,4 +121,4 @@ The local test harness uses Node's built-in test runner and does not require npm
 npm test
 ```
 
-The tests validate the expected proceed, block, warn, 404/transport fail-closed, missing-metadata, and non-content request behavior.
+The tests validate the expected proceed, block, fail-closed (404/transport/no-publishedAt/unsupported/unparseable), missing-metadata, and non-content request behavior.

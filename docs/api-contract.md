@@ -14,7 +14,7 @@ The Worker parses the Artifactory `repoPath` to derive three values:
 | `name` | Parsed from the artifact path. npm: `[@scope/]name/-/...`. PyPI: the package name segment of the wheel/sdist filename (PEP 503 normalized). |
 | `version` | Parsed from the artifact path filename. |
 
-If the ecosystem is unsupported or the path cannot be parsed, the Worker returns `ActionStatus.WARN` without calling deps.dev.
+If the ecosystem is unsupported or the path cannot be parsed, the Worker fails closed and returns `ActionStatus.STOP` without calling deps.dev. Keep the Worker scoped (manifest `repoKeys`) to remotes whose layout it parses, so this branch does not block ecosystems the gate was never meant to cover.
 
 ## Request
 
@@ -22,7 +22,7 @@ If the ecosystem is unsupported or the path cannot be parsed, the Worker returns
 GET https://api.deps.dev/v3/systems/{system}/packages/{name}/versions/{version}
 ```
 
-`{name}` and `{version}` are URL-encoded. The request timeout is `2500` ms. No headers are required.
+`{name}` and `{version}` are URL-encoded. No headers are required. `API_TIMEOUT_MS` (`2500` ms) is the *intended* request deadline, but the JFrog Workers sandbox rejects the axios `timeout` option and exposes no `AbortController`/`setTimeout`, and the manifest has no execution-duration field — so no client-side deadline is actually applied. A hung request is bounded only by the platform-internal worker execution limit.
 
 Example:
 
@@ -66,7 +66,7 @@ The age gate never injects headers, so it returns `requestHeaders: {}` on every 
 | --- | --- |
 | `publishedAt` present, `age_hours >= 48` | `ActionStatus.PROCEED` |
 | `publishedAt` present, `age_hours < 48` | `ActionStatus.STOP` (blocked) |
-| `publishedAt` missing / unparseable | `ActionStatus.WARN` |
+| `publishedAt` missing / unparseable | `ActionStatus.STOP` (fail closed) |
 | `404` (version not indexed yet) | `ActionStatus.STOP` (fail closed) |
 | Any other transport error | `ActionStatus.STOP` (fail closed) |
 

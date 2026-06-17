@@ -13,8 +13,9 @@ function safeString(value: any): string | undefined {
 }
 
 // Map an Artifactory repo key to a deps.dev system. Only npm and PyPI are
-// supported; anything else returns undefined so the Worker warns instead of
-// breaking remotes whose layout it cannot parse.
+// supported; anything else returns undefined, which makes the Worker fail
+// closed (STOP) because it cannot evaluate the package age. Keep the Worker
+// scoped (manifest repoKeys) to remotes whose layout it parses.
 function detectEcosystem(repoKey: any): string | undefined {
   const key = safeString(repoKey)?.toLowerCase() || "";
   if (key.includes("npm")) return "npm";
@@ -111,13 +112,16 @@ export default async (
     system === "pypi" ? parsePyPI(repoPath.path) :
     undefined;
 
-  // Cannot evaluate (unsupported ecosystem or unrecognized path layout): warn
-  // rather than block, so the gate never breaks remotes it cannot reason about.
+  // Cannot evaluate (unsupported ecosystem or unrecognized path layout): fail
+  // closed. We cannot reason about the package age, so block rather than let an
+  // unevaluated download through. Keep this Worker scoped (manifest repoKeys) to
+  // remotes whose layout it parses, so this branch does not block legitimate
+  // traffic on ecosystems the gate was never meant to cover.
   if (!system || !parsed) {
     const tag = system ? "unparseable-path" : "unsupported-ecosystem";
     return {
-      status: ActionStatus.WARN,
-      message: `Package age gate could not evaluate ${repoPath.key}:${repoPath.path} (${tag}); proceeding with warning.`,
+      status: ActionStatus.STOP,
+      message: `Package age gate blocked ${repoPath.key}:${repoPath.path} (${tag}); cannot evaluate package age.`,
       requestHeaders: {}
     };
   }
@@ -140,9 +144,12 @@ export default async (
   // The JFrog Workers sandbox axios rejects the `timeout` request option
   // ("Setting 'timeout' in request is not allowed"), and the sandbox does not
   // expose `AbortController`/`setTimeout`, so no client-side request deadline is
-  // available here. We rely on the sandbox's own execution limit
-  // (maxExecutionDurationMillis) to bound a hung request. API_TIMEOUT_MS is kept
-  // as the documented intended deadline for when a supported mechanism exists.
+  // available here. There is no manifest field to set an execution deadline
+  // either (the manifest schema has no duration option), so a hung request is
+  // bounded only by the platform-internal worker execution limit, whose
+  // timeout-kill behavior (block vs. proceed) is not controlled by this Worker.
+  // API_TIMEOUT_MS is kept as the documented intended deadline for when a
+  // supported mechanism exists.
   void API_TIMEOUT_MS;
 
   try {
@@ -151,9 +158,11 @@ export default async (
     const ageHours = computeAgeHours(response?.data?.publishedAt, Date.now());
 
     if (ageHours === undefined) {
+      // deps.dev answered but carried no usable publishedAt: we cannot establish
+      // the version age, so fail closed rather than proceed on an unknown age.
       return {
-        status: ActionStatus.WARN,
-        message: `Package age gate could not determine deps.dev publish time for ${packageLabel}; proceeding with warning.`,
+        status: ActionStatus.STOP,
+        message: `Package age gate blocked ${packageLabel}; deps.dev returned no usable publish time, cannot evaluate package age.`,
         requestHeaders: {}
       };
     }

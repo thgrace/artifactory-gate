@@ -61,8 +61,8 @@ Do not commit deployment manifests from `.jfrog-worker/` unless your organizatio
 | Package age is 12 hours | `publishedAt` 12h ago | `ActionStatus.STOP` |
 | Version not yet indexed | `404` | `ActionStatus.STOP` (fail closed) |
 | deps.dev unavailable | transport error | `ActionStatus.STOP` (fail closed) |
-| Cannot determine publish time | no `publishedAt` | `ActionStatus.WARN` |
-| Unsupported ecosystem / unparseable path | (no call made) | `ActionStatus.WARN` |
+| Cannot determine publish time | no `publishedAt` | `ActionStatus.STOP` (fail closed) |
+| Unsupported ecosystem / unparseable path | (no call made) | `ActionStatus.STOP` (fail closed) |
 | HEAD/checksum/metadata request | (no call made) | `ActionStatus.PROCEED` |
 
 ## Deployment Checklist

@@ -177,18 +177,18 @@ test("deps.dev transport error stops (fail closed)", async () => {
   assert.match(result.message, /status=503/);
 });
 
-test("missing publishedAt warns", async () => {
+test("missing publishedAt fails closed (block)", async () => {
   const worker = await loadWorker();
   const event = await readJson("test/fixtures/before-remote-download-event.json");
   const { context } = makeContext({ response: { isDefault: false } });
 
   const result = await worker(context, event);
 
-  assert.equal(result.status, "WARN");
-  assert.match(result.message, /could not determine deps\.dev publish time/);
+  assert.equal(result.status, "STOP");
+  assert.match(result.message, /no usable publish time/);
 });
 
-test("unsupported ecosystem warns without querying deps.dev", async () => {
+test("unsupported ecosystem fails closed without querying deps.dev", async () => {
   const worker = await loadWorker();
   const event = clone(await readJson("test/fixtures/before-remote-download-event.json"));
   event.metadata.repoPath.key = "maven-remote";
@@ -196,12 +196,12 @@ test("unsupported ecosystem warns without querying deps.dev", async () => {
 
   const result = await worker(context, event);
 
-  assert.equal(result.status, "WARN");
+  assert.equal(result.status, "STOP");
   assert.match(result.message, /unsupported-ecosystem/);
   assert.equal(getCalls.length, 0);
 });
 
-test("unparseable path warns without querying deps.dev", async () => {
+test("unparseable path fails closed without querying deps.dev", async () => {
   const worker = await loadWorker();
   const event = clone(await readJson("test/fixtures/before-remote-download-event.json"));
   event.metadata.repoPath.path = "@scope/pkg/some/weird/layout";
@@ -209,7 +209,7 @@ test("unparseable path warns without querying deps.dev", async () => {
 
   const result = await worker(context, event);
 
-  assert.equal(result.status, "WARN");
+  assert.equal(result.status, "STOP");
   assert.match(result.message, /unparseable-path/);
   assert.equal(getCalls.length, 0);
 });

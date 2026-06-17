@@ -8,7 +8,7 @@ Guidance for Claude Code working in this repository.
 
 The Worker calls deps.dev directly. It parses the Artifactory `repoPath` to derive the ecosystem, package name, and version, then issues a `GET` to `https://api.deps.dev/v3/systems/{system}/packages/{name}/versions/{version}` and reads `publishedAt`. deps.dev is unauthenticated, so no API token is required.
 
-Supported ecosystems are **npm and PyPI** (the only path layouts the Worker parses). Any other ecosystem, or a path the Worker cannot parse, returns `WARN` (cannot evaluate — do not break the remote) rather than blocking. Adding a new ecosystem means adding a path parser plus a deps.dev `system` mapping in the Worker.
+Supported ecosystems are **npm and PyPI** (the only path layouts the Worker parses). Any other ecosystem, or a path the Worker cannot parse, fails closed and returns `STOP` (cannot evaluate the age, so block) — so keep the Worker scoped (manifest `repoKeys`) to remotes whose layout it parses. Adding a new ecosystem means adding a path parser plus a deps.dev `system` mapping in the Worker.
 
 ## Repository layout
 
@@ -56,12 +56,12 @@ Condition → status mapping:
 | `age_hours < 48` | `STOP` |
 | deps.dev `404` (version not indexed) | `STOP` (fail closed) |
 | deps.dev transport error / non-404 | `STOP` (fail closed) |
-| No `publishedAt` in deps.dev response | `WARN` |
-| Unsupported ecosystem / unparseable path | `WARN` |
+| No `publishedAt` in deps.dev response | `STOP` (fail closed) |
+| Unsupported ecosystem / unparseable path | `STOP` (fail closed) |
 | Missing `repoPath` metadata | `STOP` |
 | HEAD / checksum / metadata request | `PROCEED` (skip deps.dev) |
 
-Fail-closed is intentional and must not be weakened to fail-open. A deps.dev `404` is the freshly-published case the gate exists to catch, so an unknown version blocks. By contrast, an unsupported ecosystem or unparseable path warns (never blocks) so the gate cannot break remotes whose layout it does not parse.
+Fail-closed is intentional and must not be weakened to fail-open. A deps.dev `404` is the freshly-published case the gate exists to catch, so an unknown version blocks. The Worker fails closed on every case where it cannot establish the version age — a missing/unparseable `publishedAt`, an unsupported ecosystem, or an unparseable path all return `STOP`. Because the unsupported/unparseable branch blocks, keep the Worker scoped (manifest `repoKeys`) to remotes whose layout it parses, so it does not block ecosystems the gate was never meant to cover. The only non-blocking, non-evaluating returns are the deliberate bypasses (allowlist hit and HEAD/checksum/metadata probes).
 
 ## Allowlist (operational bypass)
 
@@ -116,13 +116,23 @@ Routine allowlist requests come in as GitHub issues, not hand edits. The flow:
    `workflow_dispatch` for on-demand deploys), runs `npm test` (gate 1),
    configures JFrog CLI from the `JF_URL` and `JF_ACCESS_TOKEN` repo secrets
    (access-token auth), assembles the worker project, runs `jf worker test-run`
-   against the fixture (gate 2 — exits non-zero only if the Worker crashes), then
-   `jf worker deploy`. Because `.jfrog-worker/` is gitignored, the job assembles
-   the CLI worker project from the committed Worker source + the tracked manifest
-   at `deploy/<worker-key>/manifest.json` (the manifest, not `jf worker init`,
-   controls scope/`repoKeys`/`debug`). The worker key defaults to
-   `package-age-gate-test`, overridable via the `workflow_dispatch` `worker`
-   input or the `WORKER_KEY` repo/org variable.
+   against the fixture (gate 2 — exits non-zero only if the Worker crashes),
+   `jf worker deploy`, then a post-deploy live smoke test (gate 3 —
+   `docker/gate-test.sh suite`, see below). Because `.jfrog-worker/` is
+   gitignored, the job assembles the CLI worker project from the committed Worker
+   source + the tracked manifest at `deploy/<worker-key>/manifest.json` (the
+   manifest, not `jf worker init`, controls scope/`repoKeys`/`debug`). The worker
+   key defaults to `package-age-gate-test`, overridable via the
+   `workflow_dispatch` `worker` input or the `WORKER_KEY` repo/org variable.
+
+   Gate 3 runs only when the deployed key is the test Worker
+   (`SMOKE_WORKER_KEY`, default `package-age-gate-test`), because the suite
+   drives the dedicated npm test repos that only that Worker is scoped to. `jf`
+   is already configured by `setup-jfrog-cli`, so the harness runs on the runner
+   directly (no container); it pulls uncached packages through the test virtual
+   and fails the job if the deployed Worker does not block a fresh version, allow
+   an aged one, and honor each npm allowlist entry. Test repo keys are
+   overridable via the `GATE_VIRTUAL`/`GATE_REMOTE`/`GATE_CACHE` repo variables.
 
 Pure modules (`parse-issue.mjs`, `apply-allowlist-entry.mjs`) are network-free
 and side-effect-isolated so they unit-test directly under `node --test` without
@@ -179,7 +189,7 @@ Run all `jf worker` commands from the test Worker's directory — the worker key
 cd .jfrog-worker/package-age-gate-test
 ```
 
-1. **Sandbox dry-run (no deploy).** `jf worker test-run @./payload.json` sends the local `worker.ts` to the platform sandbox and runs it against the payload. Edit `payload.json`'s `metadata.repoPath` (and `headOnly`/`checksum`/`metadata` flags) to drive each branch of the behavior matrix — a fresh version for `STOP`, an aged version for `PROCEED`, an unparseable path for `WARN`. Use `@-` to pipe a payload from stdin. With `debug: true` in the manifest, the sandbox returns the Worker's debug logs.
+1. **Sandbox dry-run (no deploy).** `jf worker test-run @./payload.json` sends the local `worker.ts` to the platform sandbox and runs it against the payload. Edit `payload.json`'s `metadata.repoPath` (and `headOnly`/`checksum`/`metadata` flags) to drive each branch of the behavior matrix — a fresh version for `STOP`, an aged version for `PROCEED`, an unparseable path for a fail-closed `STOP`. Use `@-` to pipe a payload from stdin. With `debug: true` in the manifest, the sandbox returns the Worker's debug logs.
 
    Known test package versions (so you don't have to rederive them):
    - **`npm:@scope/pkg@1.2.3`** — the version baked into `payload.json` (npm path `@scope/pkg/-/pkg-1.2.3.tgz`). It is fictional, so deps.dev has no record → `404` → fail-closed **`STOP`**. This is the default dry-run case and confirms the fail-closed path end to end.
