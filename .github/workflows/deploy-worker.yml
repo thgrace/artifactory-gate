@@ -4,7 +4,7 @@
 #   - push to main changing a Worker source, the allowlist (whose generated block
 #     lives inside the Worker sources), or a tracked deploy manifest. The intake
 #     flow lands these via a reviewed PR, so a merge is an approved change. A push
-#     deploys EVERY tracked test Worker (matrix below).
+#     deploys EVERY tracked production Worker (matrix below).
 #   - workflow_dispatch, to deploy a single chosen target on demand.
 #
 # Deploy targets are manifest-driven. Each deployable Worker is a tracked manifest
@@ -13,11 +13,21 @@
 # derived from the key prefix: `<eco>-age-gate*` -> workers/<eco>-age-gate.before-
 # remote-download.ts (npm-* -> the npm Worker, pypi-* -> the PyPI Worker). Adding
 # an ecosystem = adding a fragment + a generated Worker + a manifest, and listing
-# its test key in the push matrix below.
+# its key in the push matrix below.
 #
 # Required GitHub secrets (access-token auth):
-#   JF_URL           - JFrog platform base URL, e.g. https://example.jfrog.io
-#   JF_ACCESS_TOKEN  - JFrog access token with permission to deploy these Workers
+#   JF_URL                     - JFrog platform base URL, e.g. https://example.jfrog.io
+#   JF_ACCESS_TOKEN            - JFrog access token with permission to deploy these Workers
+#
+# Required GitHub repo Variables (no defaults — job fails loudly when unset):
+#   NPM_AGE_GATE_REPO_KEYS   - comma-separated repo keys for npm-age-gate
+#                                  (virtual + remote; both must be listed since the
+#                                  Before Remote Download event fires on the remote)
+#                                  e.g. npm-virtual,npm-remote
+#   PYPI_AGE_GATE_REPO_KEYS  - same convention for pypi-age-gate
+#   GATE_VIRTUAL               - npm test virtual repo key (smoke test, npm only)
+#   GATE_REMOTE                - npm test remote repo key (smoke test, npm only)
+#   GATE_CACHE                 - npm test cache repo key  (smoke test, npm only)
 
 name: Deploy Worker
 
@@ -35,21 +45,20 @@ on:
         description: "Worker key to deploy (must have deploy/<worker>/manifest.json)"
         type: string
         required: false
-        default: npm-age-gate-test
+        default: npm-age-gate
 
 permissions:
   contents: read
 
 env:
-  # The post-deploy smoke gate (docker/gate-test.sh) drives the dedicated npm
+  # The post-deploy smoke gate (test/docker/gate-test.sh) drives the dedicated npm
   # test repos, and the harness implements live pulls for npm only. It runs only
-  # for this key, so deploying any other (PyPI, or a prod) target does not run a
-  # suite that target cannot satisfy.
-  SMOKE_WORKER_KEY: npm-age-gate-test
+  # for this key, so deploying the PyPI target does not run a suite it cannot satisfy.
+  SMOKE_WORKER_KEY: npm-age-gate
 
 jobs:
   # Pick the set of Worker keys to deploy: the single dispatch input on demand,
-  # or every tracked test Worker on a push to main.
+  # or every tracked production Worker on a push to main.
   select:
     runs-on: ubuntu-latest
     outputs:
@@ -64,10 +73,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            key="${INPUT_WORKER:-${VAR_WORKER_KEY:-npm-age-gate-test}}"
+            key="${INPUT_WORKER:-${VAR_WORKER_KEY:-npm-age-gate}}"
             keys="[\"${key}\"]"
           else
-            keys='["npm-age-gate-test","pypi-age-gate-test"]'
+            keys='["npm-age-gate","pypi-age-gate"]'
           fi
           echo "keys=${keys}" >> "$GITHUB_OUTPUT"
           echo "Selected targets: ${keys}"
@@ -132,18 +141,41 @@ jobs:
 
       # .jfrog-worker/ is gitignored; assemble the CLI worker project from the
       # ecosystem's committed Worker source + the tracked manifest (the manifest,
-      # not `jf worker init`, controls scope).
+      # not `jf worker init`, controls scope). repoKeys in the committed manifest
+      # are placeholders; they are overwritten here from the <KEY>_REPO_KEYS repo
+      # Variable (uppercase, hyphens replaced with underscores). The job fails
+      # loudly if the Variable is unset or empty.
       - name: Assemble worker project
         env:
           WORKER_KEY: ${{ matrix.key }}
           MANIFEST: ${{ steps.target.outputs.manifest }}
           WORKER_SOURCE: ${{ steps.target.outputs.source }}
+          REPO_KEYS_VARS: ${{ toJSON(vars) }}
         run: |
           set -euo pipefail
           work_dir=".jfrog-worker/${WORKER_KEY}"
           mkdir -p "$work_dir"
           cp "${WORKER_SOURCE}" "${work_dir}/worker.ts"
           cp "${MANIFEST}" "${work_dir}/manifest.json"
+          # Inject repoKeys from the <KEY>_REPO_KEYS repo Variable (e.g.
+          # npm-age-gate -> NPM_AGE_GATE_REPO_KEYS). Fails if unset/empty.
+          node - <<'PATCH'
+          const fs = require('fs');
+          const key = process.env.WORKER_KEY;
+          const varName = key.toUpperCase().replace(/-/g, '_') + '_REPO_KEYS';
+          const vars = JSON.parse(process.env.REPO_KEYS_VARS || '{}');
+          const raw = vars[varName];
+          if (!raw || !raw.trim()) {
+            process.stderr.write(`::error::Repo Variable ${varName} is unset or empty. Set it to a comma-separated list of repo keys (virtual + remote) for worker '${key}'.\n`);
+            process.exit(1);
+          }
+          const repoKeys = raw.split(',').map(s => s.trim()).filter(Boolean);
+          const manifestPath = `.jfrog-worker/${key}/manifest.json`;
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          manifest.filterCriteria.artifactFilterCriteria.repoKeys = repoKeys;
+          fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 4) + '\n');
+          console.log(`Patched ${manifestPath}: repoKeys = ${JSON.stringify(repoKeys)}`);
+          PATCH
 
       # Gate 2: sandbox dry-run on the live platform. `jf worker test-run` exits
       # non-zero only when the Worker crashes (executionStatus != STATUS_SUCCESS);
@@ -167,13 +199,18 @@ jobs:
       # harness runs on the runner directly — no container. It pulls uncached
       # packages through the test virtual and asserts the deployed Worker blocks a
       # fresh version, allows an aged one, and honors each npm allowlist entry; it
-      # exits non-zero on any mismatch. Repo keys are overridable via GATE_* repo
-      # variables.
+      # exits non-zero on any mismatch. GATE_VIRTUAL, GATE_REMOTE, and GATE_CACHE
+      # must be set as repo Variables — the job fails if any are missing.
       - name: Smoke test (live gate)
         if: matrix.key == env.SMOKE_WORKER_KEY
         env:
-          GATE_VIRTUAL: ${{ vars.GATE_VIRTUAL || 'appsec-test' }}
-          GATE_REMOTE: ${{ vars.GATE_REMOTE || 'npm-appsec-remote-test' }}
-          GATE_CACHE: ${{ vars.GATE_CACHE || 'npm-appsec-remote-test-cache' }}
+          GATE_VIRTUAL: ${{ vars.GATE_VIRTUAL }}
+          GATE_REMOTE: ${{ vars.GATE_REMOTE }}
+          GATE_CACHE: ${{ vars.GATE_CACHE }}
           GATE_ALLOWLIST: ${{ github.workspace }}/allowlist.json
-        run: bash docker/gate-test.sh suite
+        run: |
+          set -euo pipefail
+          : "${GATE_VIRTUAL:?GATE_VIRTUAL repo Variable must be set (npm test virtual repo key)}"
+          : "${GATE_REMOTE:?GATE_REMOTE repo Variable must be set (npm test remote repo key)}"
+          : "${GATE_CACHE:?GATE_CACHE repo Variable must be set (npm test cache repo key)}"
+          bash test/docker/gate-test.sh suite

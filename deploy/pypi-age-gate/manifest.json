@@ -1,0 +1,16 @@
+{
+    "name": "pypi-age-gate",
+    "description": "Gate uncached remote PyPI downloads by package version age. TODO: no PyPI repo is wired yet — confirm the real virtual + remote keys before first deploy. Real repoKeys are injected from the PYPI_AGE_GATE_REPO_KEYS repo Variable at deploy time and must be set by hand for a manual jf worker deploy. The remote key MUST be present or the gate never fires.",
+    "filterCriteria": {
+        "artifactFilterCriteria": {
+            "repoKeys": ["<virtual-key>", "<remote-key>"]
+        }
+    },
+    "secrets": {},
+    "sourceCodePath": "./worker.ts",
+    "action": "BEFORE_REMOTE_DOWNLOAD",
+    "enabled": true,
+    "debug": false,
+    "projectKey": "",
+    "application": "artifactory"
+}

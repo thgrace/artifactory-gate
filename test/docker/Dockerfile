@@ -5,8 +5,8 @@
 # allowed, allowlisted -> allowed). It does NOT run the Worker; the Worker runs
 # server-side in Artifactory. This image is only the client that drives it.
 #
-# Build:  docker build -t jf-gate -f docker/Dockerfile docker
-# Run:    docker run --rm --env-file docker/.env -v "$PWD:/work" jf-gate gate-test.sh suite
+# Build:  docker build -t jf-gate -f test/docker/Dockerfile test/docker
+# Run:    docker run --rm --env-file test/docker/.env -v "$PWD:/work" jf-gate gate-test.sh suite
 #
 # Token is NOT baked in — it arrives via --env-file at run time (ARTIFACTORY_URL,
 # ARTIFACTORY_TOKEN), and the entrypoint wires `jf config add` + npm auth.
@@ -37,7 +37,8 @@ RUN curl -fL https://install-cli.jfrog.io | sh \
 
 COPY docker-gate-entrypoint.sh /usr/local/bin/docker-gate-entrypoint.sh
 COPY gate-test.sh /usr/local/bin/gate-test.sh
-RUN chmod +x /usr/local/bin/docker-gate-entrypoint.sh /usr/local/bin/gate-test.sh
+COPY cache-bypass-test.sh /usr/local/bin/cache-bypass-test.sh
+RUN chmod +x /usr/local/bin/docker-gate-entrypoint.sh /usr/local/bin/gate-test.sh /usr/local/bin/cache-bypass-test.sh
 
 WORKDIR /work
 ENTRYPOINT ["docker-gate-entrypoint.sh"]

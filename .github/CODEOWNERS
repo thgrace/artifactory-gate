@@ -5,16 +5,16 @@
 # merging that PR is what actually approves a bypass. Auto-deploy then runs on
 # merge to main.
 #
-# IMPORTANT: replace @vannevarlabs/appsec below with the correct GitHub team (or
+# IMPORTANT: replace @your-org/your-team below with the correct GitHub team (or
 # user) handle for this repo. A handle that does not resolve to a team with write
 # access silently disables required-review enforcement.
 
 # Allowlist source of truth (bypass approvals).
-/allowlist.json            @vannevarlabs/appsec
+/allowlist.json            @your-org/your-team
 
 # Runtime Worker source and the generated allowlist block within it.
-/workers/                  @vannevarlabs/appsec
+/workers/                  @your-org/your-team
 
 # Intake/deploy automation and the gate itself.
-/.github/                  @vannevarlabs/appsec
-/scripts/                  @vannevarlabs/appsec
+/.github/                  @your-org/your-team
+/scripts/                  @your-org/your-team

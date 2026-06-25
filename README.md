@@ -2,9 +2,9 @@
 
 `artifactory-gate` is a JFrog Artifactory Worker for gating uncached remote package downloads by package version age.
 
-The Worker runs on the Artifactory `Before Remote Download` event. Before Artifactory downloads an uncached package from an upstream remote repository, the Worker resolves the package version's publish time from the public [deps.dev](https://deps.dev) API, computes its age, and gates the download accordingly. Supported ecosystems are npm and PyPI.
+The Worker runs on the Artifactory `Before Remote Download` event. Before Artifactory downloads an uncached package from an upstream remote repository, the Worker resolves the package version's publish time from the public [deps.dev](https://deps.dev) API, computes its age, and gates the download accordingly. There is **one Worker per ecosystem** — `npm-age-gate` and `pypi-age-gate` — each handling exactly one ecosystem.
 
-deps.dev is unauthenticated and called directly, so the Worker requires no secrets or configuration.
+deps.dev is unauthenticated and called directly, so the Workers require no secrets or configuration.
 
 ## Policy
 
@@ -14,7 +14,7 @@ deps.dev is unauthenticated and called directly, so the Worker requires no secre
 - Package age `< 48h`: return `ActionStatus.STOP` (blocked).
 - deps.dev has no record of the version (`404`, i.e. not yet indexed): fail closed — `ActionStatus.STOP`.
 - deps.dev transport error: fail closed — `ActionStatus.STOP`.
-- Unsupported ecosystem, unparseable path, or missing `publishedAt`: fail closed — `ActionStatus.STOP` (cannot evaluate the age, so block). Keep the Worker scoped (manifest `repoKeys`) to remotes whose layout it parses, so the unsupported/unparseable branch does not block ecosystems the gate was never meant to cover.
+- Unparseable path (one that does not match the Worker's ecosystem layout) or missing `publishedAt`: fail closed — `ActionStatus.STOP` (cannot evaluate the age, so block). Keep each Worker scoped (manifest `repoKeys`) to remotes whose layout it parses, so the unparseable branch does not block ecosystems the gate was never meant to cover.
 - HEAD / checksum / metadata requests: return `ActionStatus.PROCEED` (skip the deps.dev lookup; the actual content GET is still gated).
 
 Actual blocking with `STOP` on `Before Remote Download` requires the JFrog entitlement that supports Stop Action for this Worker type.
@@ -30,7 +30,7 @@ Some package versions that the gate would block (too young, or not yet indexed) 
     "name": "@scope/pkg",
     "version": "1.2.3",
     "reason": "approved exception — tracked in TICKET-123",
-    "addedBy": "6608824+thgrace@users.noreply.github.com"
+    "addedBy": "<email>"
   }
 ]
 ```

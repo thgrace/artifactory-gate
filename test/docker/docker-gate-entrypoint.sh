@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Wire the JFrog CLI + npm to Vannevar Artifactory from the mounted .env, then
+# Wire the JFrog CLI + npm to your Artifactory platform from the mounted .env, then
 # exec the container command (e.g. gate-test.sh). The configured `jf` client is
 # how the test bed pulls packages through the test virtual repo to trigger the
 # Before Remote Download Worker. Env arrives via `docker run --env-file .env`:
-#   ARTIFACTORY_URL    e.g. https://vannevarlabs.jfrog.io/artifactory
+#   ARTIFACTORY_URL    e.g. https://<company>.jfrog.io/artifactory
 #   ARTIFACTORY_TOKEN  access token
 #
 # `jf config add` wants the PLATFORM root (no /artifactory suffix); it derives the
 # artifactory + xray endpoints itself. So strip a trailing /artifactory.
 set -euo pipefail
 
-SERVER_ID="${JF_SERVER_ID:-vannevar}"
+SERVER_ID="${JF_SERVER_ID:-artifactory}"
 
 if [[ -n "${ARTIFACTORY_TOKEN:-}" && -n "${ARTIFACTORY_URL:-}" ]]; then
     platform_url="${ARTIFACTORY_URL%/}"

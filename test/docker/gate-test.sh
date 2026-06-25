@@ -7,7 +7,7 @@
 # expected decision. This is an end-to-end check of the deployed Worker — both
 # the age block and the allowlist bypass — against a live JFrog Platform.
 #
-# Decision model (mirrors workers/package-age-gate.before-remote-download.ts):
+# Decision model (mirrors workers/{npm,pypi}-age-gate.before-remote-download.ts):
 #   allowlisted exact system:name@version   -> ALLOW   (skip deps.dev)
 #   deps.dev publishedAt age >= 48h          -> ALLOW
 #   deps.dev publishedAt age <  48h          -> BLOCK
@@ -24,19 +24,23 @@
 # signal (entitlement missing), not a harness bug.
 #
 # Usage (from the host):
-#   docker run --rm --env-file docker/.env -v "$PWD:/work" jf-gate gate-test.sh suite
-#   docker run --rm --env-file docker/.env -v "$PWD:/work" jf-gate gate-test.sh check npm lodash 4.17.21
-#   docker run --rm --env-file docker/.env jf-gate gate-test.sh discover-fresh
+#   docker run --rm --env-file test/docker/.env -v "$PWD:/work" jf-gate gate-test.sh suite
+#   docker run --rm --env-file test/docker/.env -v "$PWD:/work" jf-gate gate-test.sh check npm lodash 4.17.21
+#   docker run --rm --env-file test/docker/.env jf-gate gate-test.sh discover-fresh
 #
 # Mounting the repo at /work lets the suite read allowlist.json for ALLOW cases.
 set -uo pipefail
 
-# Repo wiring — defaults match the dedicated npm test repos (see CLAUDE.md). The
-# Before Remote Download event fires on the REMOTE key, so the Worker's manifest
-# repoKeys must include $REMOTE; the client pulls through the $VIRTUAL.
-VIRTUAL="${GATE_VIRTUAL:-appsec-test}"
-REMOTE="${GATE_REMOTE:-npm-appsec-remote-test}"
-CACHE="${GATE_CACHE:-npm-appsec-remote-test-cache}"
+# Repo wiring — GATE_VIRTUAL, GATE_REMOTE, and GATE_CACHE are required config;
+# set them in test/docker/.env (or as CI repo Variables). The Before Remote
+# Download event fires on the REMOTE key, so the Worker's manifest repoKeys must
+# include $REMOTE; the client pulls through the $VIRTUAL.
+: "${GATE_VIRTUAL:?set GATE_VIRTUAL (test virtual repo key) in test/docker/.env}"
+: "${GATE_REMOTE:?set GATE_REMOTE (test remote repo key) in test/docker/.env}"
+: "${GATE_CACHE:?set GATE_CACHE (test cache repo key) in test/docker/.env}"
+VIRTUAL="$GATE_VIRTUAL"
+REMOTE="$GATE_REMOTE"
+CACHE="$GATE_CACHE"
 MIN_AGE_HOURS="${GATE_MIN_AGE_HOURS:-48}"
 ALLOWLIST="${GATE_ALLOWLIST:-/work/allowlist.json}"
 DEPS_DEV="https://api.deps.dev"
