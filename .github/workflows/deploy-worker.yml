@@ -1,24 +1,33 @@
-# Deploy the package-age-gate Worker to JFrog.
+# Deploy the per-ecosystem age-gate Workers to JFrog.
 #
 # Triggers:
-#   - push to main changing the runtime Worker source, the allowlist (whose
-#     generated block lives inside the Worker source), or a tracked deploy
-#     manifest. The intake flow lands these via a reviewed PR, so a merge is an
-#     approved change.
-#   - workflow_dispatch, to deploy a chosen target on demand.
+#   - push to main changing a Worker source, the allowlist (whose generated block
+#     lives inside the Worker sources), or a tracked deploy manifest. The intake
+#     flow lands these via a reviewed PR, so a merge is an approved change. A push
+#     deploys EVERY tracked production Worker (matrix below).
+#   - workflow_dispatch, to deploy a single chosen target on demand.
 #
-# Deploy target (Worker key) is configurable — it will move from the current
-# test Worker to a real prod Worker later, so nothing hardcodes it:
-#   1. workflow_dispatch input `worker`, else
-#   2. repo/org variable WORKER_KEY, else
-#   3. the default below (package-age-gate-test).
-# The resolved key MUST have a tracked manifest at deploy/<key>/manifest.json;
-# that manifest is the source of truth for scope (repoKeys), debug, and enabled.
-# Adding a target = adding a manifest, no workflow edits.
+# Deploy targets are manifest-driven. Each deployable Worker is a tracked manifest
+# at deploy/<key>/manifest.json, whose `name` is the Worker key and which is the
+# source of truth for scope (repoKeys), debug, and enabled. The Worker SOURCE is
+# derived from the key prefix: `<eco>-age-gate*` -> workers/<eco>-age-gate.before-
+# remote-download.ts (npm-* -> the npm Worker, pypi-* -> the PyPI Worker). Adding
+# an ecosystem = adding a fragment + a generated Worker + a manifest, and listing
+# its key in the push matrix below.
 #
 # Required GitHub secrets (access-token auth):
-#   JF_URL           - JFrog platform base URL, e.g. https://example.jfrog.io
-#   JF_ACCESS_TOKEN  - JFrog access token with permission to deploy this Worker
+#   JF_URL                     - JFrog platform base URL, e.g. https://example.jfrog.io
+#   JF_ACCESS_TOKEN            - JFrog access token with permission to deploy these Workers
+#
+# Required GitHub repo Variables (no defaults — job fails loudly when unset):
+#   NPM_AGE_GATE_REPO_KEYS   - comma-separated repo keys for npm-age-gate
+#                                  (virtual + remote; both must be listed since the
+#                                  Before Remote Download event fires on the remote)
+#                                  e.g. npm-virtual,npm-remote
+#   PYPI_AGE_GATE_REPO_KEYS  - same convention for pypi-age-gate
+#   GATE_VIRTUAL               - npm test virtual repo key (smoke test, npm only)
+#   GATE_REMOTE                - npm test remote repo key (smoke test, npm only)
+#   GATE_CACHE                 - npm test cache repo key  (smoke test, npm only)
 
 name: Deploy Worker
 
@@ -36,18 +45,49 @@ on:
         description: "Worker key to deploy (must have deploy/<worker>/manifest.json)"
         type: string
         required: false
-        default: package-age-gate-test
+        default: npm-age-gate
 
 permissions:
   contents: read
 
 env:
-  DEFAULT_WORKER_KEY: package-age-gate-test
-  WORKER_SOURCE: workers/package-age-gate.before-remote-download.ts
+  # The post-deploy smoke gate (test/docker/gate-test.sh) drives the dedicated npm
+  # test repos, and the harness implements live pulls for npm only. It runs only
+  # for this key, so deploying the PyPI target does not run a suite it cannot satisfy.
+  SMOKE_WORKER_KEY: npm-age-gate
 
 jobs:
-  deploy:
+  # Pick the set of Worker keys to deploy: the single dispatch input on demand,
+  # or every tracked production Worker on a push to main.
+  select:
     runs-on: ubuntu-latest
+    outputs:
+      keys: ${{ steps.pick.outputs.keys }}
+    steps:
+      - name: Select targets
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_WORKER: ${{ inputs.worker }}
+          VAR_WORKER_KEY: ${{ vars.WORKER_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            key="${INPUT_WORKER:-${VAR_WORKER_KEY:-npm-age-gate}}"
+            keys="[\"${key}\"]"
+          else
+            keys='["npm-age-gate","pypi-age-gate"]'
+          fi
+          echo "keys=${keys}" >> "$GITHUB_OUTPUT"
+          echo "Selected targets: ${keys}"
+
+  deploy:
+    needs: select
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        key: ${{ fromJSON(needs.select.outputs.keys) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,19 +100,24 @@ jobs:
       - name: Resolve deploy target
         id: target
         env:
-          INPUT_WORKER: ${{ inputs.worker }}
-          VAR_WORKER_KEY: ${{ vars.WORKER_KEY }}
+          KEY: ${{ matrix.key }}
         run: |
           set -euo pipefail
-          key="${INPUT_WORKER:-${VAR_WORKER_KEY:-$DEFAULT_WORKER_KEY}}"
-          manifest="deploy/${key}/manifest.json"
+          manifest="deploy/${KEY}/manifest.json"
           if [ ! -f "$manifest" ]; then
-            echo "::error::No tracked manifest at ${manifest}. Add it before deploying '${key}'." >&2
+            echo "::error::No tracked manifest at ${manifest}. Add it before deploying '${KEY}'." >&2
             exit 1
           fi
-          echo "key=${key}" >> "$GITHUB_OUTPUT"
+          # Worker source is derived from the key prefix (the ecosystem).
+          eco="${KEY%%-*}"
+          source="workers/${eco}-age-gate.before-remote-download.ts"
+          if [ ! -f "$source" ]; then
+            echo "::error::No worker source ${source} for key '${KEY}' (prefix '${eco}')." >&2
+            exit 1
+          fi
           echo "manifest=${manifest}" >> "$GITHUB_OUTPUT"
-          echo "Deploying worker '${key}' from ${manifest}"
+          echo "source=${source}" >> "$GITHUB_OUTPUT"
+          echo "Deploying worker '${KEY}' from ${manifest} using source ${source}"
 
       - name: Guard — required secrets present
         run: |
@@ -81,9 +126,10 @@ jobs:
             exit 1
           fi
 
-      # Gate 1: offline unit tests (zero deps). Includes
-      # `build-allowlist.mjs --check`, which fails if the Worker's generated
-      # allowlist block has drifted from allowlist.json.
+      # Gate 1: offline unit tests (zero deps). Includes the codegen drift guards
+      # (build-workers.mjs --check and build-allowlist.mjs --check), which fail if
+      # any generated Worker has drifted from the template/fragments or
+      # allowlist.json.
       - name: Unit tests
         run: npm test
 
@@ -94,30 +140,77 @@ jobs:
           JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
 
       # .jfrog-worker/ is gitignored; assemble the CLI worker project from the
-      # committed Worker source + the tracked manifest (the manifest, not
-      # `jf worker init`, controls scope).
+      # ecosystem's committed Worker source + the tracked manifest (the manifest,
+      # not `jf worker init`, controls scope). repoKeys in the committed manifest
+      # are placeholders; they are overwritten here from the <KEY>_REPO_KEYS repo
+      # Variable (uppercase, hyphens replaced with underscores). The job fails
+      # loudly if the Variable is unset or empty.
       - name: Assemble worker project
         env:
-          WORKER_KEY: ${{ steps.target.outputs.key }}
+          WORKER_KEY: ${{ matrix.key }}
           MANIFEST: ${{ steps.target.outputs.manifest }}
+          WORKER_SOURCE: ${{ steps.target.outputs.source }}
+          REPO_KEYS_VARS: ${{ toJSON(vars) }}
         run: |
           set -euo pipefail
           work_dir=".jfrog-worker/${WORKER_KEY}"
           mkdir -p "$work_dir"
           cp "${WORKER_SOURCE}" "${work_dir}/worker.ts"
           cp "${MANIFEST}" "${work_dir}/manifest.json"
+          # Inject repoKeys from the <KEY>_REPO_KEYS repo Variable (e.g.
+          # npm-age-gate -> NPM_AGE_GATE_REPO_KEYS). Fails if unset/empty.
+          node - <<'PATCH'
+          const fs = require('fs');
+          const key = process.env.WORKER_KEY;
+          const varName = key.toUpperCase().replace(/-/g, '_') + '_REPO_KEYS';
+          const vars = JSON.parse(process.env.REPO_KEYS_VARS || '{}');
+          const raw = vars[varName];
+          if (!raw || !raw.trim()) {
+            process.stderr.write(`::error::Repo Variable ${varName} is unset or empty. Set it to a comma-separated list of repo keys (virtual + remote) for worker '${key}'.\n`);
+            process.exit(1);
+          }
+          const repoKeys = raw.split(',').map(s => s.trim()).filter(Boolean);
+          const manifestPath = `.jfrog-worker/${key}/manifest.json`;
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          manifest.filterCriteria.artifactFilterCriteria.repoKeys = repoKeys;
+          fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 4) + '\n');
+          console.log(`Patched ${manifestPath}: repoKeys = ${JSON.stringify(repoKeys)}`);
+          PATCH
 
       # Gate 2: sandbox dry-run on the live platform. `jf worker test-run` exits
       # non-zero only when the Worker crashes (executionStatus != STATUS_SUCCESS);
-      # a clean STOP/PROCEED/WARN exits 0. The fixture is the fail-closed STOP
-      # case, so this proves the assembled source executes end to end.
+      # a clean STOP/PROCEED exits 0. The fixture is an npm path: for the npm
+      # Worker it drives the fail-closed STOP case, for the PyPI Worker it drives
+      # the unparseable-path STOP — either way it proves the assembled source
+      # executes end to end.
       - name: Test-run (sandbox dry-run)
-        working-directory: .jfrog-worker/${{ steps.target.outputs.key }}
+        working-directory: .jfrog-worker/${{ matrix.key }}
         run: jf worker test-run @"${GITHUB_WORKSPACE}/test/fixtures/before-remote-download-event.json"
 
       - name: Deploy
-        working-directory: .jfrog-worker/${{ steps.target.outputs.key }}
+        working-directory: .jfrog-worker/${{ matrix.key }}
         run: jf worker deploy
 
       - name: Verify deployed
         run: jf worker list --format json
+
+      # Gate 3: post-deploy live smoke test (npm only — see SMOKE_WORKER_KEY). `jf`
+      # is already configured against the platform (setup-jfrog-cli above), so the
+      # harness runs on the runner directly — no container. It pulls uncached
+      # packages through the test virtual and asserts the deployed Worker blocks a
+      # fresh version, allows an aged one, and honors each npm allowlist entry; it
+      # exits non-zero on any mismatch. GATE_VIRTUAL, GATE_REMOTE, and GATE_CACHE
+      # must be set as repo Variables — the job fails if any are missing.
+      - name: Smoke test (live gate)
+        if: matrix.key == env.SMOKE_WORKER_KEY
+        env:
+          GATE_VIRTUAL: ${{ vars.GATE_VIRTUAL }}
+          GATE_REMOTE: ${{ vars.GATE_REMOTE }}
+          GATE_CACHE: ${{ vars.GATE_CACHE }}
+          GATE_ALLOWLIST: ${{ github.workspace }}/allowlist.json
+        run: |
+          set -euo pipefail
+          : "${GATE_VIRTUAL:?GATE_VIRTUAL repo Variable must be set (npm test virtual repo key)}"
+          : "${GATE_REMOTE:?GATE_REMOTE repo Variable must be set (npm test remote repo key)}"
+          : "${GATE_CACHE:?GATE_CACHE repo Variable must be set (npm test cache repo key)}"
+          bash test/docker/gate-test.sh suite

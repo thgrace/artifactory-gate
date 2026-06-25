@@ -1,3 +1,7 @@
+// GENERATED — DO NOT EDIT. Run `npm run build` to regenerate.
+// Authored source: workers/src/core.template.ts (spine) +
+// workers/src/ecosystems/<system>.ts (parser, injected below) +
+// allowlist.json (inlined below).
 const MINIMUM_PACKAGE_AGE_HOURS = 48;
 const API_TIMEOUT_MS = 2500;
 const DEPS_DEV_BASE_URL = "https://api.deps.dev";
@@ -12,66 +16,14 @@ function safeString(value: any): string | undefined {
   return String(value);
 }
 
-// Map an Artifactory repo key to a deps.dev system. Only npm and PyPI are
-// supported; anything else returns undefined so the Worker warns instead of
-// breaking remotes whose layout it cannot parse.
-function detectEcosystem(repoKey: any): string | undefined {
-  const key = safeString(repoKey)?.toLowerCase() || "";
-  if (key.includes("npm")) return "npm";
-  if (key.includes("pypi") || key.includes("pip")) return "pypi";
+// <generated:ecosystem> — DO NOT EDIT BY HAND. Source: workers/src/ecosystems/<system>.ts.
+// Regenerate with: npm run build:workers
+const SYSTEM = "PLACEHOLDER";
+function parse(path: string): { name: string; version: string } | undefined {
+  void path;
   return undefined;
 }
-
-// PEP 503 normalization: lowercase and collapse runs of -, _, . to a single -.
-function normalizePyPiName(name: string): string {
-  return name.replace(/[-_.]+/g, "-").toLowerCase();
-}
-
-// npm remote layout: [@scope/]name/-/<unscoped-name>-<version>.tgz
-function parseNpm(path: string): { name: string; version: string } | undefined {
-  const marker = "/-/";
-  const markerIndex = path.indexOf(marker);
-  if (markerIndex === -1) return undefined;
-
-  const name = path.slice(0, markerIndex).replace(/^\/+/, "");
-  let filename = path.slice(markerIndex + marker.length);
-  if (filename.endsWith(".tgz")) filename = filename.slice(0, -4);
-  else if (filename.endsWith(".tar.gz")) filename = filename.slice(0, -7);
-  else return undefined;
-
-  const unscoped = name.slice(name.lastIndexOf("/") + 1);
-  const prefix = `${unscoped}-`;
-  if (!name || !filename.startsWith(prefix)) return undefined;
-
-  const version = filename.slice(prefix.length);
-  if (!version) return undefined;
-  return { name, version };
-}
-
-// PyPI remote layouts: wheels (<name>-<version>-...whl) and sdists
-// (<name>-<version>.tar.gz | .tar.bz2 | .zip).
-function parsePyPI(path: string): { name: string; version: string } | undefined {
-  const filename = path.slice(path.lastIndexOf("/") + 1);
-
-  if (filename.endsWith(".whl")) {
-    const parts = filename.slice(0, -4).split("-");
-    if (parts.length < 2) return undefined;
-    return { name: normalizePyPiName(parts[0]), version: parts[1] };
-  }
-
-  const sdistExts = [".tar.gz", ".tar.bz2", ".zip"];
-  const ext = sdistExts.find((candidate) => filename.endsWith(candidate));
-  if (!ext) return undefined;
-
-  const stem = filename.slice(0, -ext.length);
-  const splitIndex = stem.lastIndexOf("-");
-  if (splitIndex <= 0) return undefined;
-
-  const name = stem.slice(0, splitIndex);
-  const version = stem.slice(splitIndex + 1);
-  if (!name || !version) return undefined;
-  return { name: normalizePyPiName(name), version };
-}
+// </generated:ecosystem>
 
 function computeAgeHours(publishedAt: any, now: number): number | undefined {
   const publishedString = safeString(publishedAt);
@@ -105,24 +57,22 @@ export default async (
     };
   }
 
-  const system = detectEcosystem(repoPath.key);
-  const parsed =
-    system === "npm" ? parseNpm(repoPath.path) :
-    system === "pypi" ? parsePyPI(repoPath.path) :
-    undefined;
+  const parsed = parse(repoPath.path);
 
-  // Cannot evaluate (unsupported ecosystem or unrecognized path layout): warn
-  // rather than block, so the gate never breaks remotes it cannot reason about.
-  if (!system || !parsed) {
-    const tag = system ? "unparseable-path" : "unsupported-ecosystem";
+  // Cannot evaluate (unrecognized path layout): fail closed. We cannot reason
+  // about the package age, so block rather than let an unevaluated download
+  // through. This worker is scoped to one ecosystem (manifest repoKeys); keep it
+  // pointed at remotes whose layout it parses so this branch does not block
+  // legitimate traffic.
+  if (!parsed) {
     return {
-      status: ActionStatus.WARN,
-      message: `Package age gate could not evaluate ${repoPath.key}:${repoPath.path} (${tag}); proceeding with warning.`,
+      status: ActionStatus.STOP,
+      message: `Package age gate blocked ${repoPath.key}:${repoPath.path} (unparseable-path); cannot evaluate package age.`,
       requestHeaders: {}
     };
   }
 
-  const packageLabel = `${system}:${parsed.name}@${parsed.version}`;
+  const packageLabel = `${SYSTEM}:${parsed.name}@${parsed.version}`;
 
   // Operational exception: an exact name@version pin in the allowlist bypasses
   // the gate entirely (skip deps.dev, skip age and 404/transport fail-closed).
@@ -135,14 +85,17 @@ export default async (
     };
   }
 
-  const versionUrl = `${DEPS_DEV_BASE_URL}/v3/systems/${system}/packages/${encodeURIComponent(parsed.name)}/versions/${encodeURIComponent(parsed.version)}`;
+  const versionUrl = `${DEPS_DEV_BASE_URL}/v3/systems/${SYSTEM}/packages/${encodeURIComponent(parsed.name)}/versions/${encodeURIComponent(parsed.version)}`;
 
   // The JFrog Workers sandbox axios rejects the `timeout` request option
   // ("Setting 'timeout' in request is not allowed"), and the sandbox does not
   // expose `AbortController`/`setTimeout`, so no client-side request deadline is
-  // available here. We rely on the sandbox's own execution limit
-  // (maxExecutionDurationMillis) to bound a hung request. API_TIMEOUT_MS is kept
-  // as the documented intended deadline for when a supported mechanism exists.
+  // available here. There is no manifest field to set an execution deadline
+  // either (the manifest schema has no duration option), so a hung request is
+  // bounded only by the platform-internal worker execution limit, whose
+  // timeout-kill behavior (block vs. proceed) is not controlled by this Worker.
+  // API_TIMEOUT_MS is kept as the documented intended deadline for when a
+  // supported mechanism exists.
   void API_TIMEOUT_MS;
 
   try {
@@ -151,9 +104,11 @@ export default async (
     const ageHours = computeAgeHours(response?.data?.publishedAt, Date.now());
 
     if (ageHours === undefined) {
+      // deps.dev answered but carried no usable publishedAt: we cannot establish
+      // the version age, so fail closed rather than proceed on an unknown age.
       return {
-        status: ActionStatus.WARN,
-        message: `Package age gate could not determine deps.dev publish time for ${packageLabel}; proceeding with warning.`,
+        status: ActionStatus.STOP,
+        message: `Package age gate blocked ${packageLabel}; deps.dev returned no usable publish time, cannot evaluate package age.`,
         requestHeaders: {}
       };
     }

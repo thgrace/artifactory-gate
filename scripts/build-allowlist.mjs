@@ -20,9 +20,10 @@ const rootDir = resolve(__dirname, "..");
 
 export const ALLOWLIST_PATH = "allowlist.json";
 
-// The runtime Worker carries the generated allowlist block.
+// The per-ecosystem runtime Workers each carry the generated allowlist block.
 export const TARGETS = [
-  "workers/package-age-gate.before-remote-download.ts"
+  "workers/npm-age-gate.before-remote-download.ts",
+  "workers/pypi-age-gate.before-remote-download.ts"
 ];
 
 const BEGIN = "// <generated:allowlist>";
